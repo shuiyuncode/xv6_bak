@@ -313,6 +313,9 @@ virtio_disk_intr()
     __sync_synchronize();
     int id = disk.used->ring[disk.used_idx % NUM].id;
 
+    // qemu的virtio disk设备作为磁盘驱动23。disk.info[id].status是一个表示磁盘操作状态的字段23，
+    // 它的值可以是0（空闲），1（正在使用），或者2（完成）2。
+    // 如果disk.info[id].status != 0，那么表示该磁盘操作还没有完成或者已经完成但还没有被处理。
     if(disk.info[id].status != 0)
       panic("virtio_disk_intr status");
 

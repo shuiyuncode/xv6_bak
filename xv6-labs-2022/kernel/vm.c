@@ -36,8 +36,7 @@ kvmmake(void)
   // map kernel text executable and read-only.
   kvmmap(kpgtbl, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
 
-  // map kernel data and the physical RAM we'll make use of. 
-  // etext end text ~ PHYSTOP 全部做了痕等映射
+  // map kernel data and the physical RAM we'll make use of.
   kvmmap(kpgtbl, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
 
   // map the trampoline for trap entry/exit to
@@ -304,7 +303,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
 int
-uvmcopy2(pagetable_t old, pagetable_t new, uint64 sz)
+uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;
@@ -323,7 +322,7 @@ uvmcopy2(pagetable_t old, pagetable_t new, uint64 sz)
     memmove(mem, (char*)pa, PGSIZE);
     if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
       kfree(mem);
-      goto err; 
+      goto err;
     }
   }
   return 0;
@@ -331,34 +330,6 @@ uvmcopy2(pagetable_t old, pagetable_t new, uint64 sz)
  err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
-}
-
-// Copy on write
-int
-uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
-{
-  pte_t *pte;
-  uint64 pa, i;
-  uint flags;
-
-  for (i = 0; i < sz; i += PGSIZE)
-  {
-    if ((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if ((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
-    pa = PTE2PA(*pte);
-    if (*pte & PTE_W)
-      *pte = ((*pte) | PTE_COW) & (~PTE_W); // page fault use and clear write flag
-    flags = PTE_FLAGS(*pte);
-    if (mappages(new, i, PGSIZE, pa, flags) != 0)
-      return -1;
-    // map完成后 修改页面的引用次数
-    kaddref((void *)pa);
-  }
-
- 
-  return 0;
 }
 
 // mark a PTE invalid for user access.
@@ -377,50 +348,20 @@ uvmclear(pagetable_t pagetable, uint64 va)
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
-
-// 需要注意的是 每次循环最多复制1个page 因为用户空间的映射的page不一定是连续的
-// [300, 4096) [4096, 8192)
 int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
-  pte_t* pte;
+
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    if(va0 >= MAXVA)  
-      return -1;
-    if((pte = walk(pagetable, va0, 0)) == 0)
-      return -1;
-    if (((*pte & PTE_V) == 0) || ((*pte & PTE_U)) == 0) 
-      return -1;
-    pa0 = PTE2PA(*pte);
-
-    if ((*pte & PTE_W) == 0 && (*pte & PTE_COW))
-    { // copy user date to a new page
-      char *ka = kalloc();
-      if (ka == 0)
-      { // If a COW page fault occurs and there's no free memory, the process should be killed.
-        printf("copyout(): memery alloc fault\n");
-        return -1;
-      }
-
-      memmove(ka, (char *)pa0, PGSIZE); // copy data 此时基于kernel pagetable的
-
-      uint flags = PTE_FLAGS(*pte);   // old pte flags
-      uvmunmap(pagetable, va0, 1, 1); // avoid remap panic, then *pte = 0
-                                      // last arg must is 1, then rf_count will sub 1
-      if (mappages(pagetable, va0, PGSIZE, (uint64)ka, flags | PTE_W) != 0) {
-        kfree(ka);
-        return -1;
-      }
-    }
-
+    pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
-    n = PGSIZE - (dstva - va0);// 每次最多拷贝 PGSIZE
+    n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
-    memmove((void *)(pa0 + (dstva - va0)), src, n);// copy kernel data to  user page
+    memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
     src += n;
@@ -494,41 +435,5 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
-  }
-}
-
-
-void 
-vmprint(pagetable_t pagetable)
-{
-  printf("page table %p\n", pagetable);
-  // 每个 page table 512个pte  pagetable_t 是一个uint64* 指针
-  pagetable_t pg2 = pagetable, pg1, pg0;
-  for (int L2 = 0; L2 < 512; L2++)
-  {
-    pte_t *pte2 = &pg2[L2];// there is not &pg2[L2 * 8]
-    if (*pte2 & PTE_V)
-    {
-      // printf("..%d: pte %p pa %p\n", L2, *pte2, pg2 + L2 );
-      printf("..%d: pte %p pa %p\n", L2, *pte2, PTE2PA(*pte2));
-      pg1 = (pagetable_t)PTE2PA(*pte2);
-      for (int L1 = 0; L1 < 512; L1++)
-      {
-        pte_t *pte1 = &pg1[L1];
-        if (*pte1 & PTE_V)
-        {
-          // printf(".. ..%d: pte %p pa %p\n", L1, *pte1, pg1 + L1);
-          printf(".. ..%d: pte %p pa %p\n", L1, *pte1, PTE2PA(*pte1) );
-          pg0 = (pagetable_t)PTE2PA(*pte1);
-          for (int L0 = 0; L0 < 512; L0++)
-          {
-            pte_t *pte0 = &pg0[L0];
-            if (*pte0 & PTE_V)
-              // printf(".. .. ..%d: pte %p pa %p\n", L0, *pte0, pg0 + L0);
-              printf(".. .. ..%d: pte %p pa %p\n", L0, *pte0, PTE2PA(*pte0));
-          }
-        }
-      }
-    }
   }
 }

@@ -8,7 +8,7 @@
             "program": "${workspaceFolder}/kernel/kernel",
             // "program": "${workspaceFolder}/user/_sh",
             "args": [],
-            "stopAtEntry": true,
+            "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "miDebuggerServerAddress": "127.0.0.1:26000",
             //看你喜欢可以修改成什么能用的gdb，为了防止奇怪现象我选择了rv
@@ -18,21 +18,21 @@
             "MIMode": "gdb",
             "preLaunchTask": "run",
             "setupCommands": [
-                // {
-                //     "description": "pretty printing",
-                //     "text": "-enable-pretty-printing",
-                //     "ignoreFailures": true,
-                // },
+                {
+                    "description": "pretty printing",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true,
+                },
                 //在这里加载了寄存器信息表
-                // {
-                //     "text": "set tdesc filename myxml.xml",
-                // },
+                {
+                    "text": "set tdesc filename myxml.xml",
+                },
                 // 调试子进程
                 // set follow-fork-mode [parent|child]
                 // parent: fork之后继续调试父进程，子进程不受影响。
                 // child: fork之后调试子进程，父进程不受影响。
-                // {"text": "-gdb-set follow-fork-mode child"},
-                // {"text": "-gdb-set detach-on-fork off"},
+                {"text": "-gdb-set follow-fork-mode child"},
+                {"text": "-gdb-set detach-on-fork off"},
             ],
             //用于gdb调试的工具，可以发现gdb出错的原因
             "logging": {

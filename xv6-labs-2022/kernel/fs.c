@@ -70,7 +70,7 @@ balloc(uint dev)
 
   bp = 0;
   for(b = 0; b < sb.size; b += BPB){
-    bp = bread(dev, BBLOCK(b, sb));
+    bp = bread(dev, BBLOCK(b, sb));// bread --> bget 先从buffer cache中找编号为 bn 的block 没有的话在从磁盘上加载到内存的buffer cache中
     for(bi = 0; bi < BPB && b + bi < sb.size; bi++){
       m = 1 << (bi % 8);
       if((bp->data[bi/8] & m) == 0){  // Is block free?
@@ -292,6 +292,7 @@ idup(struct inode *ip)
 void
 ilock(struct inode *ip)
 {
+  // printf("-----ilock-----\n");
   struct buf *bp;
   struct dinode *dip;
 
@@ -320,6 +321,7 @@ ilock(struct inode *ip)
 void
 iunlock(struct inode *ip)
 {
+  // printf("-----inulock-----\n");
   if(ip == 0 || !holdingsleep(&ip->lock) || ip->ref < 1)
     panic("iunlock");
 
@@ -362,6 +364,7 @@ iput(struct inode *ip)
 }
 
 // Common idiom: unlock, then put.
+// release lock of inode and release the inode self
 void
 iunlockput(struct inode *ip)
 {
@@ -382,7 +385,10 @@ iunlockput(struct inode *ip)
 static uint
 bmap(struct inode *ip, uint bn)
 {
-  uint addr, *a;
+  // addr 应该是物理磁盘的block number，在fs实验中最大为 200000 所以使用uint类型完全够用
+  // addr1 是第一层 indirect block 
+  // addr2 是第二层 indirect block
+  uint addr, *a, addr1, addr2;
   struct buf *bp;
 
   if(bn < NDIRECT){
@@ -394,9 +400,10 @@ bmap(struct inode *ip, uint bn)
     }
     return addr;
   }
-  bn -= NDIRECT;
-
-  if(bn < NINDIRECT){
+  bn -= NDIRECT;// -11 表示 bn从第11开始
+  
+  // a singly-indirect block
+  if(bn < NINDIRECT) {// [0, 255]
     // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0){
       addr = balloc(ip->dev);
@@ -417,6 +424,53 @@ bmap(struct inode *ip, uint bn)
     return addr;
   }
 
+
+  // 下面逻辑处理 double-indirect block
+  bn -= NINDIRECT; // bn - 255即 从256开始算转换后为0  [0, 10] [11, 11+255] [11+255, 11+255+255*255]
+  if(bn < NINDIRECT * NINDIRECT){// [0, 256*256-1] not is 256*256      对于3*3二维数组是0~8
+    // bn = 300  = 255 +45
+    // 第一层 0 第二层 0 ~ 255 [0,   255]
+    // 第一层 1 第二层 0 ~ 255 [256, 511]
+    // 第一层 2 第二层 0 ~ 255 [512, 767]
+    // 第一层 3 第二层 0 ~ 255 [768, 1023]
+    // ...
+
+    uint first_bn = bn / NINDIRECT;
+    uint second_bn = bn % NINDIRECT;
+    
+    // Load indirect block, allocating if necessary.
+    if((addr = ip->addrs[NDIRECT+1]) == 0){// ip->addrs[NDIRECT] 是第一层的indirect
+      addr = balloc(ip->dev);// balloc是由底层的bget操作保证原子性的
+      if(addr == 0)
+        return 0;
+      ip->addrs[NDIRECT+1] = addr;
+    }
+    // 第一层indirect block
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr1 = a[first_bn]) == 0){
+      addr1 = balloc(ip->dev);
+      if(addr1){
+        a[first_bn] = addr1;
+        log_write(bp);
+      }
+    }
+    brelse(bp);// Don't forget to brelse() each block that you bread().
+
+    // 第二层indirect block
+    bp = bread(ip->dev, addr1);
+    a = (uint*)bp->data;
+    if((addr2 = a[second_bn]) == 0){
+      addr2 = balloc(ip->dev);
+      if(addr2){
+        a[second_bn] = addr2;
+        log_write(bp);
+      }
+    }
+    brelse(bp);// Don't forget to brelse() each block that you bread().
+    return addr2;
+  }
+
   panic("bmap: out of range");
 }
 
@@ -425,9 +479,9 @@ bmap(struct inode *ip, uint bn)
 void
 itrunc(struct inode *ip)
 {
-  int i, j;
-  struct buf *bp;
-  uint *a;
+  int i, j, m, n;
+  struct buf *bp, *bp1, *bp2;
+  uint *a, *b;
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
@@ -436,6 +490,7 @@ itrunc(struct inode *ip)
     }
   }
 
+  // singly-indirect block
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
@@ -446,6 +501,28 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  // doubly-indirect block free
+  if(ip->addrs[NDIRECT+1]){
+    bp1 = bread(ip->dev, ip->addrs[NDIRECT+1]); // read first indirect block
+    a = (uint*)bp1->data;
+    for(m = 0; m < NINDIRECT; m++){
+      if(a[m]){
+        bp2 = bread(ip->dev, a[m]); // read second indirect block
+        b = (uint*)bp2->data;
+        for(n = 0; n < NINDIRECT; n++){
+          if(b[n]){
+            bfree(ip->dev, b[n]); // free data block
+          }
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[m]);
+      }
+    }
+    brelse(bp1);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;
@@ -612,13 +689,17 @@ dirlink(struct inode *dp, char *name, uint inum)
 // The returned path has no leading slashes,
 // so the caller can check *path=='\0' to see if the name is the last one.
 // If no name to remove, return 0.
+// 如果skipelem返回'\0'，表示提取出的path element已经是最后一个
+// 如果path是'\0'，那么skipelem返回0
 //
 // Examples:
 //   skipelem("a/bb/c", name) = "bb/c", setting name = "a"
 //   skipelem("///a//bb", name) = "bb", setting name = "a"
 //   skipelem("a", name) = "", setting name = "a"
 //   skipelem("", name) = skipelem("////", name) = 0
-//
+// skipelem做的事情是解析给定的路径名path。它提取出path中的下一个元素，并拷贝到name中，
+// 然后返回在下个元素之后的后续路径，如注释中的几个示例所示。 --- 参考上面的例子
+// 如果提取出的下一个元素已经是最后一个元素，那么返回"\0"。如果输入path是"\0"，那么返回0。
 static char*
 skipelem(char *path, char *name)
 {
@@ -633,13 +714,13 @@ skipelem(char *path, char *name)
   while(*path != '/' && *path != 0)
     path++;
   len = path - s;
-  if(len >= DIRSIZ)
+  if(len >= DIRSIZ) // name max len is DIRSIZE
     memmove(name, s, DIRSIZ);
   else {
     memmove(name, s, len);
     name[len] = 0;
   }
-  while(*path == '/')
+  while(*path == '/') // when len > DIRSIZE what will happend
     path++;
   return path;
 }
@@ -652,13 +733,24 @@ static struct inode*
 namex(char *path, int nameiparent, char *name)
 {
   struct inode *ip, *next;
-
+  // 决定从哪里开始找，如果有'/'就从根目录开始，否则从当前目录开始
   if(*path == '/')
     ip = iget(ROOTDEV, ROOTINO);
   else
-    ip = idup(myproc()->cwd);
+    ip = idup(myproc()->cwd); // 当前目录的inode
 
-  while((path = skipelem(path, name)) != 0){
+  //   skipelem("a/bb/c", name) = "bb/c", setting name = "a"
+  //   skipelem("///a//bb", name) = "bb", setting name = "a"
+  //   skipelem("a", name) = "", setting name = "a"
+  //   skipelem("", name) = skipelem("////", name) = 0
+  while((path = skipelem(path, name)) != 0){// 使用skipelem来解析当前路径名path
+    // skipelem将下个path element拷贝到name中，返回跟在下个path element的后续路径
+    // 如果*path=='\0'就表示提取出的path element已经是最后一个
+    // 例: 最开始path = '/a/b'，b可以是文件也可以是目录，当前目录ip为根目录'/'
+    // 1、path = /b,name = a,next = name = a,ip = next = a
+    // 2、path = "\0",name = b,(如果是nameiparent就在这一步停止并返回ip = a,name = b),
+    // next = name = b,ip = next = b
+    // 3、path = 0,name = b,ip = b,namei在跳出循环后返回ip = b
     ilock(ip);
     if(ip->type != T_DIR){
       iunlockput(ip);
@@ -677,12 +769,21 @@ namex(char *path, int nameiparent, char *name)
     ip = next;
   }
   if(nameiparent){
+    // 正常情况下nameiparent应该在主循环中就返回
+    // 如果运行到了这里，说明nameiparent失败，因此namex返回0
     iput(ip);
     return 0;
   }
+  // When the loop runs out of path elements, it returns
   return ip;
 }
 
+
+// namei和nameiparent就负责这样的路径名查找，它们都接收完整的路径名作为输入，返回相关的inode
+// 不同之处在于，namei返回路径名中最后一个元素的inode；
+// 而nameiparent返回最后一个元素的父目录的inode，
+// 并且将最后一个元素的名称复制到调用者指定的位置*name中。
+// 这两个函数都调用namex完成路径名查找的工作。
 struct inode*
 namei(char *path)
 {
@@ -690,6 +791,8 @@ namei(char *path)
   return namex(path, 0, name);
 }
 
+
+// nameiparent返回最后一个元素的父目录的inode，并且将最后一个元素的名称复制到调用者指定的位置*name中。
 struct inode*
 nameiparent(char *path, char *name)
 {

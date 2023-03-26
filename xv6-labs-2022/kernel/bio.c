@@ -96,7 +96,7 @@ bread(uint dev, uint blockno)
 
   b = bget(dev, blockno);
   if(!b->valid) {
-    virtio_disk_rw(b, 0);
+    virtio_disk_rw(b, 0); // 从磁盘上读取出数据
     b->valid = 1;
   }
   return b;

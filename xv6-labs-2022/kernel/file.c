@@ -43,6 +43,7 @@ filealloc(void)
   return 0;
 }
 
+// filedup创建一个打开文件struct file的副本，逻辑很简单，只是简单地增加引用计数ref，然后返回指向相同struct file的指针
 // Increment ref count for file f.
 struct file*
 filedup(struct file *f)
@@ -55,6 +56,9 @@ filedup(struct file *f)
   return f;
 }
 
+// fileclose减少ref引用计数。当ref大于1时，直接将ref减1即可返回；
+// 当ref=1时，代表对该打开文件的最后一个引用也将删除，fileclose就更改该打开文件的类型为FD_NONE，
+// 然后再检查该打开文件下层资源的类型，如果是pipe或inode，还要相应地调用pipeclose或iput，以关闭和释放这些底层资源。
 // Close file f.  (Decrement ref count, close when reaches 0.)
 void
 fileclose(struct file *f)
@@ -82,6 +86,7 @@ fileclose(struct file *f)
   }
 }
 
+// filestat利用前一章中的stati接口，为系统调用fstat提供服务。filestat只允许对inode类型读取其stat信息。
 // Get metadata about file f.
 // addr is a user virtual address, pointing to a struct stat.
 int
@@ -101,6 +106,8 @@ filestat(struct file *f, uint64 addr)
   return -1;
 }
 
+// fileread根据不同的底层文件类型，检查文件可读模式是否打开，然后调用不同的方法来读取这些资源，为系统调用read提供服务。
+// fileread和接下来的filewrite都使用了struct file中的偏移量off，每次读完之后就更新它，有一个例外是管道，管道没有偏移量。
 // Read from file f.
 // addr is a user virtual address.
 int
@@ -129,6 +136,10 @@ fileread(struct file *f, uint64 addr, int n)
   return r;
 }
 
+// fileread和filewrite中利用了ilock的锁机制，读取和写入的偏移量都将会原子地更新，因此对同一文件的多次写入不会覆盖彼此的数据，
+// 对同一文件的多次读也不会读出重复的数据。利用ilock的锁机制，我们不需要在struct file中再额外添加一把锁保护off。
+
+// filewrite如下，和fileread类似，这次检查写模式是否打开，它为系统调用write提供服务。
 // Write to file f.
 // addr is a user virtual address.
 int

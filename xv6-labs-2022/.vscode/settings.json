@@ -1,6 +1,8 @@
 {
+    "C_Cpp.clang_format_fallbackStyle": "{ BasedOnStyle: LLVM, IndentWidth: 4, BreakBeforeBraces: Attach}",
     "files.associations": {
-        "proc.h": "c",
-        "defs.h": "c"
+        "file.h": "c",
+        "fcntl.h": "c",
+        "stat.h": "c"
     }
 }

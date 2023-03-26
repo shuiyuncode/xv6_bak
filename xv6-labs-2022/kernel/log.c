@@ -122,6 +122,7 @@ recover_from_log(void)
   write_head(); // clear the log
 }
 
+// only when write file call this function, read is not needed
 // called at the start of each FS system call.
 void
 begin_op(void)
